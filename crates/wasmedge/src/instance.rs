@@ -6,6 +6,7 @@ use containerd_shim_wasm::sandbox::oci;
 use containerd_shim_wasm::sandbox::{EngineGetter, Instance, InstanceConfig};
 use libc::{dup, dup2, SIGKILL, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
 use log::{debug, error};
+use wasmedge_sdk::error::WasmEdgeError;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::os::unix::io::{IntoRawFd, RawFd};
@@ -235,12 +236,43 @@ impl Instance for Wasi {
             }
             exec::Context::Child => {
                 // child process
-
-                // TODO: How to get exit code?
-                // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
+                let err_base = 137;
                 let _ret = match vm.run_func(Some("main"), "_start", params!()) {
                     Ok(_) => std::process::exit(0),
-                    Err(_) => std::process::exit(137),
+                    Err(e) => {
+                        let exit_code = match *e {
+                            WasmEdgeError::CompilerCreate => err_base + 1,
+                            WasmEdgeError::ConfigCreate => err_base + 2,
+                            WasmEdgeError::Core(_) => err_base + 3,
+                            WasmEdgeError::ExecutorCreate => err_base + 4,
+                            WasmEdgeError::Export(_) => err_base + 5,
+                            WasmEdgeError::FoundNulByte(_) => err_base + 6,
+                            WasmEdgeError::FromUtf8(_) => err_base + 7,
+                            WasmEdgeError::Func(_) => err_base + 8,
+                            WasmEdgeError::FuncTypeCreate => err_base + 9,
+                            WasmEdgeError::Global(_) => err_base + 10,
+                            WasmEdgeError::GlobalTypeCreate => err_base + 11,
+                            WasmEdgeError::Import(_) => err_base + 12,
+                            WasmEdgeError::ImportObjCreate => err_base + 13,
+                            WasmEdgeError::Instance(_) => err_base + 14,
+                            WasmEdgeError::LoaderCreate => err_base + 15,
+                            WasmEdgeError::Mem(_) => err_base + 16,
+                            WasmEdgeError::MemTypeCreate => err_base + 17,
+                            WasmEdgeError::ModuleCreate => err_base + 18,
+                            WasmEdgeError::NotFoundNulByte(_) => err_base + 19,
+                            WasmEdgeError::Operation(_) => err_base + 20,
+                            WasmEdgeError::StatisticsCreate => err_base + 21,
+                            WasmEdgeError::Store(_) => err_base + 22,
+                            WasmEdgeError::Table(_) => err_base + 23,
+                            WasmEdgeError::TableTypeCreate => err_base + 24,
+                            WasmEdgeError::User(_) => err_base + 25,
+                            WasmEdgeError::Utf8(_) => err_base + 26,
+                            WasmEdgeError::ValidatorCreate => err_base + 27,
+                            WasmEdgeError::Vm(_) => err_base + 28,
+                            WasmEdgeError::WindowsPathConversion(_) => err_base + 29,
+                        };
+                        std::process::exit(exit_code);
+                    }
                 };
             }
         }
