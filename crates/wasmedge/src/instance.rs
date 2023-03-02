@@ -345,10 +345,24 @@ mod wasitest {
     "#
     .as_bytes();
 
+    fn get_external_wasm_module(name: String) -> Result<Vec<u8>, Error> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let target = Path::new(manifest_dir)
+            .join("../../target/wasm32-wasi/debug")
+            .join(name.clone());
+        let ret = std::fs::read(target).map_err(|e| {
+            super::Error::Others(format!(
+                "failed to read requested Wasm module ({}): {}",
+                name, e
+            ))
+        });
+        return ret;
+    }
+
     fn run_wasi_test(dir: &TempDir, wasmbytes: Cow<[u8]>) -> Result<(u32, DateTime<Utc>), Error> {
         create_dir(dir.path().join("rootfs"))?;
 
-        let mut f = File::create(dir.path().join("rootfs/hello.wasm"))?;
+        let mut f = File::create(dir.path().join("rootfs/file.wasm"))?;
         f.write_all(&wasmbytes)?;
 
         let stdout = File::create(dir.path().join("stdout"))?;
@@ -359,7 +373,7 @@ mod wasitest {
             .process(
                 ProcessBuilder::default()
                     .cwd("/")
-                    .args(vec!["hello.wasm".to_string()])
+                    .args(vec!["file.wasm".to_string()])
                     .build()?,
             )
             .build()?;
@@ -432,6 +446,29 @@ mod wasitest {
 
         // Expect error code from the run.
         assert_eq!(res.0, 137);
+
+        reset_stdio();
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_files() -> Result<(), Error> {
+        let dir = tempdir()?;
+        let path = dir.path();
+
+        let wasmbytes = get_external_wasm_module("list-files.wasm".to_string())?;
+
+        let res = run_wasi_test(&dir, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        let output = read_to_string(path.join("stdout"))?;
+        assert!(
+            output.ends_with("/dev/zero not found\n"),
+            "got:\n{}'",
+            output
+        );
 
         reset_stdio();
         Ok(())

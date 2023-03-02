@@ -6,6 +6,7 @@ members = [
     "crates/thirdparty",
     "crates/wasmedge",
     "crates/wasmtime",
+    "test/wasi-modules-for-testing",
 ]
 
 [workspace.package]
