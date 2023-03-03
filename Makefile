@@ -35,8 +35,17 @@ target/wasm32-wasi/$(TARGET)/wasi-demo-app.wasm:
 target/wasm32-wasi/$(TARGET)/img.tar: target/wasm32-wasi/$(TARGET)/wasi-demo-app.wasm
 	cd crates/wasi-demo-app && cargo build --features oci-v1-tar
 
-load: target/wasm32-wasi/$(TARGET)/img.tar
-	sudo ctr -n $(CONTAINERD_NAMESPACE) image import --all-platforms $<
+.PHONY: target/wasm32-wasi/$(TARGET)/list-files.wasm
+target/wasm32-wasi/$(TARGET)/list-files.wasm:
+	cd test/wasi-modules-for-testing && cargo build
+
+.PHONY: target/wasm32-wasi/$(TARGET)/list-files-img.tar
+target/wasm32-wasi/$(TARGET)/list-files-img.tar: target/wasm32-wasi/$(TARGET)/list-files.wasm
+	cd test/wasi-modules-for-testing && cargo build --features oci-v1-tar
+
+load: target/wasm32-wasi/$(TARGET)/img.tar target/wasm32-wasi/$(TARGET)/list-files-img.tar
+	sudo ctr -n $(CONTAINERD_NAMESPACE) image import --all-platforms target/wasm32-wasi/debug/img.tar
+	sudo ctr -n $(CONTAINERD_NAMESPACE) image import --all-platforms target/wasm32-wasi/debug/list-files-img.tar
 
 bin/kind: test/k8s/Dockerfile
 	$(DOCKER_BUILD) --output=bin/ -f test/k8s/Dockerfile --target=kind .

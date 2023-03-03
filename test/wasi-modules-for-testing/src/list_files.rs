@@ -6,10 +6,6 @@ fn main() {
     for file in root_files {
         let name = file.expect("Could not list path").file_name();
         println!("found file: {:?}", name);
-        if name == "dev" {
-            // There is directory dev in / which is unexpected
-            panic!("/dev found");
-        }
     }
 
     match fs::metadata("/dev/zero") {

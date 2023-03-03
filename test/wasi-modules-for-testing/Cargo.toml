@@ -7,4 +7,17 @@ edition = "2021"
 name = "list-files"
 path = "src/list_files.rs"
 
+[build-dependencies]
+tar = { workspace = true, optional = true }
+sha256 = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+env_logger = { workspace = true, optional = true }
+oci-spec = { workspace = true, optional = true }
+oci-tar-builder = { optional = true, path = "../../crates/oci-tar-builder" }
+anyhow = { workspace = true, optional = true }
+
+[features]
+default = []
+oci-v1-tar = ["default", "tar", "sha256", "log", "env_logger", "oci-spec", "oci-tar-builder", "anyhow"]
+
 [dependencies]
