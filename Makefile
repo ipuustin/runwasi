@@ -59,6 +59,9 @@ test/k8s/deploy: test/k8s/cluster
 test/k8s/clean:
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
 
+test/wasm-modules:
+	cargo build -p wasi-modules-for-testing --target wasm32-wasi
+
 .PHONY: bin/wasmedge
 bin/wasmedge:
 	curl -sSf https://raw.githubusercontent.com/WasmEdge/WasmEdge/master/utils/install.sh | bash -s -- -p $(PWD)/bin/wasmedge && \
