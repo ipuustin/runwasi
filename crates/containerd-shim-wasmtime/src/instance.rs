@@ -11,6 +11,7 @@ use containerd_shim_wasm::sandbox::exec;
 use containerd_shim_wasm::sandbox::oci;
 use containerd_shim_wasm::sandbox::{EngineGetter, Instance, InstanceConfig};
 use log::{debug, error};
+use nix::libc::{socketpair, AF_UNIX, SOCK_DGRAM};
 use nix::sys::signal::SIGKILL;
 use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::{sync::file::File as WasiFile, WasiCtx, WasiCtxBuilder};
@@ -29,6 +30,7 @@ pub struct Wasi {
     bundle: String,
 
     pidfd: Arc<Mutex<Option<exec::PidFD>>>,
+    container_id: String,
 }
 
 #[cfg(test)]
@@ -138,7 +140,7 @@ pub fn prepare_module(
 
 impl Instance for Wasi {
     type E = wasmtime::Engine;
-    fn new(_id: String, cfg: Option<&InstanceConfig<Self::E>>) -> Self {
+    fn new(id: String, cfg: Option<&InstanceConfig<Self::E>>) -> Self {
         let cfg = cfg.unwrap(); // TODO: handle error
         Wasi {
             exit_code: Arc::new((Mutex::new(None), Condvar::new())),
@@ -148,6 +150,7 @@ impl Instance for Wasi {
             stderr: cfg.get_stderr().unwrap_or_default(),
             bundle: cfg.get_bundle().unwrap_or_default(),
             pidfd: Arc::new(Mutex::new(None)),
+            container_id: id,
         }
     }
     fn start(&self) -> Result<u32, Error> {
@@ -170,7 +173,7 @@ impl Instance for Wasi {
 
         let mut store = Store::new(&engine, m.0);
 
-        debug!("instantiating instnace");
+        debug!("instantiating instance");
         let i = linker
             .instantiate(&mut store, &m.1)
             .map_err(|err| Error::Others(format!("error instantiating module: {}", err)))?;
@@ -186,6 +189,15 @@ impl Instance for Wasi {
 
         oci::setup_cgroup(cg.as_ref(), &spec)
             .map_err(|e| Error::Others(format!("error setting up cgroups: {}", e)))?;
+
+        // Create a socket pair for handling the seccomp data transfer.
+        let mut fds: [i32; 2] = [0, 0];
+        unsafe {
+            let ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, fds.as_mut_ptr());
+            if ret != 0 {
+                return Err(Error::Others("Error calling socketpair".to_string()));
+            }
+        }
 
         let res = unsafe { exec::fork(Some(cg.as_ref())) }?;
         match res {
@@ -214,10 +226,57 @@ impl Instance for Wasi {
                     drop(ec);
                     cvar.notify_all();
                 });
+                if let Some(notify_path) = oci::is_seccomp_notify(&spec)? {
+                    // This is only needed if client is going to send
+                    // the seccomp notify fd.
+                    let bundle = self.bundle.clone();
+                    let container_id = self.container_id.clone();
+                    let _ = thread::spawn(move || {
+                        let send_container_process_state = |fd: u32| -> Result<(), Error> {
+                            let state = oci::create_container_process_state(
+                                &spec,
+                                tid as i32,
+                                bundle,
+                                container_id,
+                            )?;
+                            // Send the state over to the recipient at the other end of the UDS.
+                            oci::send_container_process_state_over_path(state, fd, notify_path)
+                        };
+
+                        let res = oci::receive_notify_fd(fds[1], send_container_process_state);
+                        if res.is_err() {
+                            error!("error receiving notify fd!");
+                        }
+                    });
+                }
                 Ok(tid)
             }
             exec::Context::Child => {
                 // child process
+
+                // Setup the seccomp filter.
+                let notification_fd = oci::setup_seccomp(&spec);
+                match notification_fd {
+                    Ok(Some(fd)) => {
+                        // There is an external approver process
+                        // for seccomp requests. We need to send the
+                        // notification fd over to the main process, so
+                        // that it can in turn send the container process
+                        // state over.
+
+                        // Send seccomp notify fd to the main process. This
+                        // is a synchronous call -- we need to wait for an ack
+                        // for the seccomp external processing to be ready.
+                        if oci::send_notify_fd(fd, fds[0]).is_err() {
+                            std::process::exit(137);
+                        }
+                    }
+                    Ok(None) => {
+                        // There was no external processing for any seccomp action
+                        // -- no need to do anything special.
+                    }
+                    Err(_) => std::process::exit(137),
+                };
 
                 // TODO: How to get exit code?
                 // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
@@ -274,13 +333,18 @@ impl Instance for Wasi {
 
 #[cfg(test)]
 mod wasitest {
+    use std::borrow::Cow;
     use std::fs::{create_dir, read_to_string, File};
     use std::io::prelude::*;
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
-    use oci_spec::runtime::{ProcessBuilder, RootBuilder, SpecBuilder};
-    use tempfile::tempdir;
+    use libc::{prctl, PR_SET_NO_NEW_PRIVS};
+    use oci_spec::runtime::{
+        LinuxBuilder, LinuxSeccompAction, LinuxSeccompBuilder, LinuxSyscallBuilder, ProcessBuilder,
+        RootBuilder, Spec, SpecBuilder,
+    };
+    use tempfile::{tempdir, TempDir};
 
     use super::*;
 
@@ -321,6 +385,236 @@ mod wasitest {
             Some(&InstanceConfig::new(Engine::default())),
         );
         i.delete().unwrap();
+    }
+
+    fn get_external_wasm_module(name: String) -> Result<Vec<u8>, Error> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let target = Path::new(manifest_dir)
+            .join("../../target/wasm32-wasi/debug")
+            .join(name.clone());
+        let ret = std::fs::read(target).map_err(|e| {
+            super::Error::Others(format!(
+                "failed to read requested Wasm module ({}): {}",
+                name, e
+            ))
+        });
+        return ret;
+    }
+
+    fn run_wasi_test_with_spec(
+        dir: &TempDir,
+        spec: &Spec,
+        wasmbytes: Cow<[u8]>,
+    ) -> Result<(u32, DateTime<Utc>), Error> {
+        create_dir(dir.path().join("rootfs"))?;
+
+        let mut f = File::create(dir.path().join("rootfs/file.wasm"))?;
+        f.write_all(&wasmbytes)?;
+
+        let stdout = File::create(dir.path().join("stdout"))?;
+        drop(stdout);
+
+        spec.save(dir.path().join("config.json"))?;
+
+        let mut cfg = InstanceConfig::new(Wasi::new_engine()?);
+        let cfg = cfg
+            .set_bundle(dir.path().to_str().unwrap().to_string())
+            .set_stdout(dir.path().join("stdout").to_str().unwrap().to_string());
+
+        let wasi = Arc::new(Wasi::new("test".to_string(), Some(cfg)));
+
+        wasi.start()?;
+
+        let w = wasi.clone();
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            w.wait(tx).unwrap();
+        });
+
+        let res = match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                wasi.kill(SIGKILL as u32).unwrap();
+                return Err(Error::Others(format!(
+                    "error waiting for module to finish: {0}",
+                    e
+                )));
+            }
+        };
+        return res;
+    }
+
+    fn run_wasi_test(dir: &TempDir, wasmbytes: Cow<[u8]>) -> Result<(u32, DateTime<Utc>), Error> {
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .build()?;
+
+        run_wasi_test_with_spec(dir, &spec, wasmbytes)
+    }
+
+    #[test]
+    fn test_wasi_with_external_hello_world() -> Result<(), Error> {
+        let dir = tempdir()?;
+        let path = dir.path();
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+        let res = run_wasi_test(&dir, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        let output = read_to_string(path.join("stdout"))?;
+        assert_eq!(output, "hello world\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_seccomp_hello_world_pass() -> Result<(), Error> {
+        let dir = tempdir()?;
+        let path = dir.path();
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+        unsafe {
+            // seccomp requires either set_no_new_privs bit set or CAP_SYS_ADMIN.
+            let ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            assert!(ret == 0);
+        }
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["fcntl".to_string()]) // system call 72
+                                .action(LinuxSeccompAction::ScmpActKillProcess)
+                                .build()?])
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        let output = read_to_string(path.join("stdout"))?;
+        assert_eq!(output, "hello world\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_seccomp_hello_world_fail() -> Result<(), Error> {
+        let dir = tempdir()?;
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+        unsafe {
+            // seccomp requires either set_no_new_privs bit set or CAP_SYS_ADMIN.
+            let ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            assert!(ret == 0);
+        }
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["writev".to_string()]) // system call 20
+                                .action(LinuxSeccompAction::ScmpActErrno)
+                                .build()?])
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 137); // Returns an error
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[test]
+    fn test_seccomp_hello_world_notify() -> Result<(), Error> {
+        // Test how seccomp works together with an external notification agent.
+        // Configure the external agent to use socket /tmp/seccomp-agent.socket
+        // and set it to either allow or decline (with error) "writev" system
+        // call.
+
+        let dir = tempdir()?;
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+        unsafe {
+            // seccomp requires either set_no_new_privs bit set or CAP_SYS_ADMIN.
+            let ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            assert!(ret == 0);
+        }
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["writev".to_string()]) // system call 20
+                                .action(LinuxSeccompAction::ScmpActNotify)
+                                .build()?])
+                            .listener_path("/tmp/seccomp-agent.socket")
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0); // Returns success or error, depending on how the external agent is configured
+
+        Ok(())
     }
 
     #[test]
