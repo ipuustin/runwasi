@@ -28,6 +28,8 @@ clone3 = "0.2"
 libc = { workspace = true }
 caps = "0.5"
 proc-mounts = "0.3"
+# Use main branch until a new release with oci-spec 0.6.0 is made
+libcontainer = { git = "https://github.com/containers/youki" }
 
 [build-dependencies]
 ttrpc-codegen = { version = "0.3", optional = true }
