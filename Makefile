@@ -62,6 +62,9 @@ test/k8s/clean:
 test/wasm-modules:
 	cargo build -p wasi-modules-for-testing --target wasm32-wasi
 
+test: test/wasm-modules
+	cargo test -- --nocapture
+
 .PHONY: bin/wasmedge
 bin/wasmedge:
 	curl -sSf https://raw.githubusercontent.com/WasmEdge/WasmEdge/master/utils/install.sh | bash -s -- -p $(PWD)/bin/wasmedge && \

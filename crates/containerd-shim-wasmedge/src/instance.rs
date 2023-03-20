@@ -259,7 +259,10 @@ mod wasitest {
     use containerd_shim_wasm::function;
     use containerd_shim_wasm::sandbox::exec::has_cap_sys_admin;
     use containerd_shim_wasm::sandbox::testutil::run_test_with_sudo;
-    use oci_spec::runtime::{ProcessBuilder, RootBuilder, SpecBuilder};
+    use oci_spec::runtime::{
+        LinuxBuilder, LinuxSeccompAction, LinuxSeccompBuilder, LinuxSyscallBuilder, ProcessBuilder,
+        RootBuilder, Spec, SpecBuilder,
+    };
     use tempfile::{tempdir, TempDir};
 
     use serial_test::serial;
@@ -309,12 +312,30 @@ mod wasitest {
     "#
     .as_bytes();
 
-    fn run_wasi_test(dir: &TempDir, wasmbytes: Cow<[u8]>) -> Result<(u32, DateTime<Utc>), Error> {
+    fn get_external_wasm_module(name: String) -> Result<Vec<u8>, Error> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let target = Path::new(manifest_dir)
+            .join("../../target/wasm32-wasi/debug")
+            .join(name.clone());
+        let ret = std::fs::read(target).map_err(|e| {
+            super::Error::Others(format!(
+                "failed to read requested Wasm module ({}): {}",
+                name, e
+            ))
+        });
+        return ret;
+    }
+
+    fn run_wasi_test_with_spec(
+        dir: &TempDir,
+        spec: &Spec,
+        wasmbytes: Cow<[u8]>,
+    ) -> Result<(u32, DateTime<Utc>), Error> {
         create_dir(dir.path().join("rootfs"))?;
         let rootdir = dir.path().join("runwasi");
         create_dir(&rootdir)?;
 
-        let wasm_path = dir.path().join("rootfs/hello.wasm");
+        let wasm_path = dir.path().join("rootfs/file.wasm");
         let mut f = OpenOptions::new()
             .write(true)
             .create(true)
@@ -325,16 +346,6 @@ mod wasitest {
 
         let stdout = File::create(dir.path().join("stdout"))?;
         drop(stdout);
-
-        let spec = SpecBuilder::default()
-            .root(RootBuilder::default().path("rootfs").build()?)
-            .process(
-                ProcessBuilder::default()
-                    .cwd("/")
-                    .args(vec!["./hello.wasm".to_string()])
-                    .build()?,
-            )
-            .build()?;
 
         spec.save(dir.path().join("config.json"))?;
 
@@ -366,6 +377,20 @@ mod wasitest {
         };
         wasi.delete()?;
         res
+    }
+
+    fn run_wasi_test(dir: &TempDir, wasmbytes: Cow<[u8]>) -> Result<(u32, DateTime<Utc>), Error> {
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["./file.wasm".to_string()])
+                    .build()?,
+            )
+            .build()?;
+
+        run_wasi_test_with_spec(dir, &spec, wasmbytes)
     }
 
     #[test]
@@ -423,6 +448,174 @@ mod wasitest {
         assert_eq!(res.0, 137);
 
         reset_stdio();
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_wasi_with_external_hello_world() -> Result<(), Error> {
+        if !has_cap_sys_admin() {
+            println!("running test with sudo: {}", function!());
+            return run_test_with_sudo(function!());
+        }
+
+        let dir = tempdir()?;
+        let path = dir.path();
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+        let res = run_wasi_test(&dir, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        let output = read_to_string(path.join("stdout"))?;
+        assert_eq!(output, "hello world\n");
+
+        reset_stdio();
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_seccomp_hello_world_pass() -> Result<(), Error> {
+        if !has_cap_sys_admin() {
+            println!("running test with sudo: {}", function!());
+            return run_test_with_sudo(function!());
+        }
+
+        let dir = tempdir()?;
+        let path = dir.path();
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["fcntl".to_string()]) // system call 72
+                                .action(LinuxSeccompAction::ScmpActKillProcess)
+                                .build()?])
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        let output = read_to_string(path.join("stdout"))?;
+        assert_eq!(output, "hello world\n");
+
+        reset_stdio();
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_seccomp_hello_world_fail() -> Result<(), Error> {
+        if !has_cap_sys_admin() {
+            println!("running test with sudo: {}", function!());
+            return run_test_with_sudo(function!());
+        }
+
+        let dir = tempdir()?;
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["writev".to_string()]) // system call 20
+                                .action(LinuxSeccompAction::ScmpActErrno)
+                                .build()?])
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 137); // Returns an error
+
+        reset_stdio();
+        Ok(())
+    }
+
+    #[ignore]
+    #[test]
+    #[serial]
+    fn test_seccomp_hello_world_notify() -> Result<(), Error> {
+        // Test how seccomp works together with an external notification agent.
+        // Configure the external agent to use socket /tmp/seccomp-agent.socket
+        // and set it to either allow or decline (with error) "writev" system
+        // call.
+
+        let dir = tempdir()?;
+
+        let wasmbytes = get_external_wasm_module("hello-world.wasm".to_string())?;
+
+        // Logged syscalls: 20, 16, 131, 11, 231
+
+        let spec = SpecBuilder::default()
+            .root(RootBuilder::default().path("rootfs").build()?)
+            .process(
+                ProcessBuilder::default()
+                    .cwd("/")
+                    .args(vec!["file.wasm".to_string()])
+                    .build()?,
+            )
+            .linux(
+                LinuxBuilder::default()
+                    .seccomp(
+                        LinuxSeccompBuilder::default()
+                            .default_action(LinuxSeccompAction::ScmpActAllow)
+                            .architectures(vec![oci_spec::runtime::Arch::ScmpArchNative])
+                            .syscalls(vec![LinuxSyscallBuilder::default()
+                                .names(vec!["writev".to_string()]) // system call 20
+                                .action(LinuxSeccompAction::ScmpActNotify)
+                                .build()?])
+                            .listener_path("/tmp/seccomp-agent.socket")
+                            .build()?,
+                    )
+                    .build()?,
+            )
+            .build()?;
+
+        let res = run_wasi_test_with_spec(&dir, &spec, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0); // Returns success or error, depending on how the external agent is configured
+
+        reset_stdio();
+
         Ok(())
     }
 }
