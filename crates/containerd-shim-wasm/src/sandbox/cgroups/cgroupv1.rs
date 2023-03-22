@@ -155,6 +155,7 @@ impl Cgroup for CgroupV1 {
             };
         }
 
+        #[allow(clippy::iter_kv_map)]
         self.controllers
             .iter()
             .map(|(kind, _subsys)| {

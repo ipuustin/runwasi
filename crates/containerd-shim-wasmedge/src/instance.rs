@@ -135,6 +135,7 @@ pub fn prepare_module(
     if stdin.is_some() {
         unsafe {
             STDIN_FD = Some(dup(STDIN_FILENO));
+            #[allow(clippy::unnecessary_unwrap)]
             dup2(stdin.unwrap(), STDIN_FILENO);
         }
     }
@@ -144,6 +145,7 @@ pub fn prepare_module(
     if stdout.is_some() {
         unsafe {
             STDOUT_FD = Some(dup(STDOUT_FILENO));
+            #[allow(clippy::unnecessary_unwrap)]
             dup2(stdout.unwrap(), STDOUT_FILENO);
         }
     }
@@ -153,6 +155,7 @@ pub fn prepare_module(
     if stderr.is_some() {
         unsafe {
             STDERR_FD = Some(dup(STDERR_FILENO));
+            #[allow(clippy::unnecessary_unwrap)]
             dup2(stderr.unwrap(), STDERR_FILENO);
         }
     }
@@ -235,6 +238,7 @@ impl Instance for Wasi {
 
                 // TODO: How to get exit code?
                 // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
+                #[allow(clippy::let_unit_value)]
                 let _ret = match vm.run_func(Some("main"), "_start", params!()) {
                     Ok(_) => std::process::exit(0),
                     Err(_) => std::process::exit(137),
@@ -255,6 +259,7 @@ impl Instance for Wasi {
         let fd = lr
             .as_ref()
             .ok_or_else(|| Error::FailedPrecondition("module is not running".to_string()))?;
+        #[allow(clippy::unnecessary_cast)]
         fd.kill(SIGKILL as i32)
     }
 

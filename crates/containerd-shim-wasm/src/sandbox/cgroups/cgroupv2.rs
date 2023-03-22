@@ -244,6 +244,7 @@ impl Cgroup for CgroupV2 {
             if let Some(weight) = blkio.weight() {
                 if weight != 0 {
                     // Use BFQ
+                    #[allow(clippy::redundant_pattern_matching)]
                     if let Err(_) =
                         ensure_write_file(self.get_file(IO_BFQ_WEIGHT)?, &format!("{}", weight))
                     {

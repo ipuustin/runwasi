@@ -221,6 +221,7 @@ impl Instance for Wasi {
 
                 // TODO: How to get exit code?
                 // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
+                #[allow(clippy::let_unit_value)]
                 let _ret = match f.call(&mut store, &[], &mut []) {
                     Ok(_) => std::process::exit(0),
                     Err(_) => std::process::exit(137),

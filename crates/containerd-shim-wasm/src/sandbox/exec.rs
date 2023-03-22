@@ -144,6 +144,7 @@ pub fn has_cap_sys_admin() -> bool {
 /// The child should not depend on other threads in the parent process since the new process becomes single threaded.
 ///
 /// This is marked as unsafe because this can effect things like mutex locks or other previously shared state which is no longer shared (with the child process) after the fork.
+#[allow(clippy::missing_safety_doc)]
 pub unsafe fn fork(cgroup: Option<&dyn Cgroup>) -> Result<Context, Error> {
     let mut builder = Clone3::default();
 
