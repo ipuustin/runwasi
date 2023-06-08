@@ -90,8 +90,8 @@ impl Instance for MyInstance {
 }
 
 fn main() {
-    let s: ManagerService<Local<MyInstance>> =
-        ManagerService::new(Engine::new(Config::new().interruptable(true)).unwrap());
+    let s: ManagerService<_, Local<MyInstance, _>> =
+        ManagerService::new(Engine::new(&Config::new().interruptable(true)).unwrap());
     let s = Arc::new(Box::new(s) as Box<dyn Manager + Send + Sync>);
     let service = create_manager(s);
 
