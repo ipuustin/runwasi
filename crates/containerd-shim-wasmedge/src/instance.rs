@@ -521,6 +521,35 @@ mod wasitest {
         reset_stdio();
         Ok(())
     }
+
+    fn get_external_wasm_module(name: String) -> Result<Vec<u8>, Error> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let target = Path::new(manifest_dir)
+            .join("../../target/wasm32-wasi/debug")
+            .join(name.clone());
+        std::fs::read(target).map_err(|e| {
+            super::Error::Others(format!(
+                "failed to read requested Wasm module ({}): {}",
+                name, e
+            ))
+        })
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_files() -> Result<(), Error> {
+        if !has_cap_sys_admin() {
+            println!("running test with sudo: {}", function!());
+            return run_test_with_sudo(function!());
+        }
+        let dir = tempdir()?;
+        let wasmbytes = get_external_wasm_module("list-files.wasm".to_string())?;
+        let res = run_wasi_test(&dir, Cow::from(wasmbytes))?;
+
+        assert_eq!(res.0, 0);
+
+        Ok(())
+    }
 }
 
 impl EngineGetter for Wasi {

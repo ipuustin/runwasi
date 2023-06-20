@@ -3027,6 +3027,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasi-modules-for-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "oci-spec 0.6.1",
+ "oci-tar-builder",
+ "sha256",
+ "tar",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.87"
 source = "registry+https://github.com/rust-lang/crates.io-index"

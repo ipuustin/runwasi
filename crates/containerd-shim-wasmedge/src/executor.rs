@@ -51,10 +51,11 @@ impl Executor for WasmEdgeExecutor {
             .ok_or_else(|| anyhow::Error::msg("Not found wasi module"))
             .map_err(|err| ExecutorError::Execution(err.into()))?;
 
+        // map the container root filesystem to be available to the WASI module
         wasi_module.initialize(
             Some(args.iter().map(|s| s as &str).collect()),
             Some(envs.iter().map(|s| s as &str).collect()),
-            None,
+            Some(vec!["/:/"]),
         );
 
         let vm = vm

@@ -24,6 +24,11 @@ libcontainer = { workspace = true }
 tempfile = "3.0"
 pretty_assertions = "1"
 serial_test = "*"
+# Depend on the built Wasm modules. This requires "-Z bindep" parameter to cargo which is only
+# available in the nightly channel. The workaround is to build first and test afterwards:
+#     cargo build -p test/wasi-modules-for-testing --target=wasm32-wasi
+#     cargo test
+# wasi-modules-for-testing = { path = "../../test/wasi-modules-for-testing", artifact = "bin" }
 
 [features]
 wasi_nn = ["wasmedge-sdk/wasi_nn"]
